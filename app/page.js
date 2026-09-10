@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
 
 const WELCOME = {
   role: 'assistant',
@@ -8,9 +10,13 @@ const WELCOME = {
     "Bonjour, je suis votre Coach Manager. Décrivez-moi une situation concrète que vous traversez en ce moment avec votre équipe.",
 };
 
-function CoachAvatar() {
+function CoachAvatar({ faded }) {
   return (
-    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold mt-1">
+    <div
+      className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold mt-1 ${
+        faded ? 'bg-blue-300' : 'bg-blue-600'
+      }`}
+    >
       CM
     </div>
   );
@@ -24,12 +30,70 @@ function SendIcon() {
   );
 }
 
+function LoadingDots() {
+  return (
+    <div className="flex gap-1 items-center h-4">
+      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
+      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
+      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" />
+    </div>
+  );
+}
+
 export default function Home() {
-  const [messages, setMessages] = useState([WELCOME]);
+  const router = useRouter();
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+
+  useEffect(() => {
+    async function initAuth() {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      if (!currentUser) {
+        router.push('/login');
+        return;
+      }
+      setUser(currentUser);
+
+      // Load message history for this bot
+      try {
+        const { data: bot } = await supabase
+          .from('bots')
+          .select('id')
+          .eq('slug', 'coach-manager')
+          .single();
+
+        if (bot) {
+          const { data: history } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('bot_id', bot.id)
+            .order('created_at', { ascending: true });
+
+          const pastMessages = (history || []).map((m) => ({ ...m, isPast: true }));
+          setMessages([WELCOME, ...pastMessages]);
+        } else {
+          setMessages([WELCOME]);
+        }
+      } catch {
+        setMessages([WELCOME]);
+      }
+
+      setAuthLoading(false);
+    }
+
+    initAuth();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') router.push('/login');
+    });
+
+    return () => subscription.unsubscribe();
+  }, [router]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -51,15 +115,21 @@ export default function Home() {
     setInput('');
     setIsStreaming(true);
 
-    // Exclude the static welcome from API payload — the system prompt covers it
+    // Build API payload: exclude static WELCOME, strip isPast flag
     const apiMessages = history
       .filter((m, i) => !(i === 0 && m === WELCOME))
       .map(({ role, content }) => ({ role, content }));
 
+    const { data: { session } } = await supabase.auth.getSession();
+    const token = session?.access_token;
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
         body: JSON.stringify({ messages: apiMessages }),
       });
 
@@ -100,6 +170,23 @@ export default function Home() {
     }
   }
 
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.push('/login');
+  }
+
+  if (authLoading) {
+    return (
+      <div className="flex h-[100dvh] bg-gray-50 items-center justify-center">
+        <div className="flex gap-1.5">
+          <span className="w-2 h-2 bg-blue-600 rounded-full animate-bounce [animation-delay:-0.3s]" />
+          <span className="w-2 h-2 bg-blue-600 rounded-full animate-bounce [animation-delay:-0.15s]" />
+          <span className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-50">
       {/* Header */}
@@ -114,9 +201,18 @@ export default function Home() {
             </h1>
             <p className="text-xs text-gray-500">Coaching managérial · TPE</p>
           </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400"></span>
-            <span className="text-xs text-gray-500">En ligne</span>
+          <div className="ml-auto flex items-center gap-3">
+            <div className="hidden sm:flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-green-400"></span>
+              <span className="text-xs text-gray-500">En ligne</span>
+            </div>
+            <span className="hidden sm:block text-xs text-gray-400">{user?.email}</span>
+            <button
+              onClick={handleLogout}
+              className="text-xs text-gray-500 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 transition-colors hover:border-gray-300"
+            >
+              Déconnexion
+            </button>
           </div>
         </div>
       </header>
@@ -124,31 +220,46 @@ export default function Home() {
       {/* Messages */}
       <main className="flex-1 overflow-y-auto px-4 py-6">
         <div className="max-w-3xl mx-auto space-y-4">
-          {messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              {msg.role === 'assistant' && <CoachAvatar />}
-              <div
-                className={`max-w-[80%] sm:max-w-[70%] px-4 py-3 text-sm leading-relaxed ${
-                  msg.role === 'user'
-                    ? 'bg-blue-600 text-white rounded-2xl rounded-tr-sm'
-                    : 'bg-white text-gray-800 border border-gray-200 rounded-2xl rounded-tl-sm shadow-sm'
-                }`}
-              >
-                {msg.content || (
-                  isStreaming && i === messages.length - 1 ? (
-                    <span className="flex gap-1 items-center h-4">
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" />
-                    </span>
-                  ) : null
+          {messages.map((msg, i) => {
+            const isPast = !!msg.isPast;
+            // Show a "session en cours" separator when past messages end
+            const showSeparator =
+              !isPast && messages[i - 1]?.isPast === true;
+
+            return (
+              <div key={i}>
+                {showSeparator && (
+                  <div className="flex items-center gap-3 my-6">
+                    <div className="flex-1 h-px bg-gray-200" />
+                    <span className="text-xs text-gray-400 whitespace-nowrap">Session en cours</span>
+                    <div className="flex-1 h-px bg-gray-200" />
+                  </div>
                 )}
+                <div
+                  className={`flex gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  {msg.role === 'assistant' && <CoachAvatar faded={isPast} />}
+                  <div
+                    className={`max-w-[80%] sm:max-w-[70%] px-4 py-3 text-sm leading-relaxed ${
+                      msg.role === 'user'
+                        ? isPast
+                          ? 'bg-blue-200 text-blue-800 rounded-2xl rounded-tr-sm'
+                          : 'bg-blue-600 text-white rounded-2xl rounded-tr-sm'
+                        : isPast
+                        ? 'bg-gray-100 text-gray-500 border border-gray-100 rounded-2xl rounded-tl-sm'
+                        : 'bg-white text-gray-800 border border-gray-200 rounded-2xl rounded-tl-sm shadow-sm'
+                    }`}
+                  >
+                    {msg.content || (
+                      isStreaming && i === messages.length - 1 ? (
+                        <LoadingDots />
+                      ) : null
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           <div ref={messagesEndRef} />
         </div>
       </main>
