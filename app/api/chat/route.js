@@ -14,7 +14,6 @@ const SYSTEM_PROMPT =
 // Cache the bot_id to avoid repeated DB lookups
 let cachedBotId = null;
 
-// Client anon pour les lectures publiques (table bots, politique bots_public_read)
 function getSupabaseAnon() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -23,7 +22,6 @@ function getSupabaseAnon() {
   );
 }
 
-// Client authentifié avec le JWT de l'utilisateur pour les écritures RLS-protégées
 function getSupabaseUser(token) {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -43,7 +41,6 @@ async function getBotId() {
     .select('id')
     .eq('slug', 'coach-manager')
     .single();
-  if (error) console.error('[getBotId] Erreur DB:', error.message);
   if (data?.id) cachedBotId = data.id;
   return data?.id ?? null;
 }
@@ -52,10 +49,8 @@ export async function POST(request) {
   const authHeader = request.headers.get('Authorization');
   const token = authHeader?.slice(7); // Remove "Bearer "
 
-  // Vérification du token via le client anon
   const anon = getSupabaseAnon();
   const { data: { user }, error: authError } = await anon.auth.getUser(token);
-  console.log('[DEBUG] user.id:', user?.id ?? 'null', '| authError:', authError?.message ?? 'aucune');
   if (authError || !user) {
     return new Response('Non autorisé', { status: 401 });
   }
@@ -64,7 +59,6 @@ export async function POST(request) {
   const userMessage = messages[messages.length - 1];
 
   const botId = await getBotId();
-  console.log('[DEBUG] botId:', botId);
 
   const stream = anthropic.messages.stream({
     model: 'claude-haiku-4-5-20251001',
@@ -94,16 +88,8 @@ export async function POST(request) {
           { user_id: user.id, bot_id: botId, role: 'user', content: userMessage.content },
           { user_id: user.id, bot_id: botId, role: 'assistant', content: fullText },
         ];
-        console.log('[DEBUG] Insert payload:', JSON.stringify(rows));
         const userClient = getSupabaseUser(token);
-        const { data: insertData, error: insertError } = await userClient
-          .from('messages')
-          .insert(rows)
-          .select();
-        console.log('[DEBUG] Insert data:', JSON.stringify(insertData));
-        console.log('[DEBUG] Insert error:', insertError ? JSON.stringify(insertError) : 'aucune');
-      } else {
-        console.error('[messages] bot_id introuvable — aucun bot avec slug="coach-manager" en DB');
+        await userClient.from('messages').insert(rows);
       }
 
       controller.close();
